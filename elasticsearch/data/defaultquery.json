@@ -1,0 +1,15 @@
+{
+  "bool": {
+    "must": [
+      {
+        "multi_match": {
+          "query": ||QUERY||,
+          "fields": ||FIELDS||,
+          "type": "best_fields",
+          "operator": "OR",
+          "fuzziness": "auto"
+        }
+      }
+    ]
+  }
+}

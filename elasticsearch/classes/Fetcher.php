@@ -1,0 +1,1249 @@
+<?php
+namespace ElasticsearchModule;
+
+use Adapter_Exception;
+use AttributeGroup;
+use Category;
+use Configuration;
+use Context;
+use Customer;
+use Db;
+use DbQuery;
+use Elasticsearch;
+use Group;
+use Image;
+use ImageType;
+use Link;
+use Logger;
+use Manufacturer;
+use Page;
+use PrestaShopDatabaseException;
+use PrestaShopException;
+use Product;
+use ProductSale;
+use Shop;
+use SmartyException;
+use stdClass;
+use Tools;
+use Validate;
+use Exception;
+
+if (!defined('_TB_VERSION_')) {
+    return;
+}
+
+/**
+ * Class Fetcher
+ *
+ * When fetching a product for Elasticsearch indexing, it will call the functions as defined in the
+ * `$attributes` array. If the value `null` is used, it will grab the property directly from the
+ * fire team Product object.
+ *
+ * @package ElasticsearchModule
+ */
+class Fetcher
+{
+    const CATEGORY_DELIMITER = ' /// ';
+    /**
+     * Cached category paths
+     * @var array
+     */
+    static $cachedCategoryPaths = [];
+
+    /**
+     * Avoid these categories (root and home)
+     * @var array
+     */
+    static $avoidCategories = null;
+
+    /**
+     * Properties array
+     *
+     * Defaults:
+     * - function: null
+     * - default: 'text'
+     * - elastic_types: all
+     * - visible: true
+     *
+     * @var array $attributes
+     */
+    public static $attributes = [
+        'active' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+            'visible' => false,
+        ],
+        'name' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'reference' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                META::ELASTIC_TYPE_KEYWORD,
+                META::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'allow_oosp' => [
+            'function' => [__CLASS__, 'getAllowOosp'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+            'visible' => false,
+        ],
+        'available_for_order' => [
+            'function' => [__CLASS__, 'getAvailableForOrder'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+            'visible' => false,
+        ],
+        'available_now' => [
+            'function' => [__CLASS__, 'getAvailableNow'],
+            'default' => Meta::ELASTIC_TYPE_KEYWORD,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+            ],
+        ],
+        'available_later' => [
+            'function' => [__CLASS__, 'getAvailableLater'],
+            'default' => Meta::ELASTIC_TYPE_KEYWORD,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+            ],
+        ],
+        'category' => [
+            'function' => [__CLASS__, 'getCategoryName'],
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'categories' => [
+            'function' => [__CLASS__, 'getCategoriesNames'],
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'categories_without_path' => [
+            'function' => [__CLASS__, 'getCategoriesNamesWithoutPath'],
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'color_list' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_KEYWORD,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+            ],
+            'visible' => false,
+        ],
+        'condition' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_KEYWORD,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+            ],
+        ],
+        'customization_required' => [
+            'function' => [__CLASS__, 'getCustomizationRequired'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+            'visible' => false,
+        ],
+        'date_add' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_DATE,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_DATE,
+            ],
+        ],
+        'date_upd' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_DATE,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_DATE,
+            ],
+        ],
+        'description' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'description_short' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'ean13' => [
+            'function' => [__CLASS__, 'getEan'],
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'image_link_large' => [
+            'function' => [__CLASS__, 'generateImageLinkLarge'],
+            'default' => Meta::ELASTIC_TYPE_KEYWORD,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+            ],
+        ],
+        'image_link_small' => [
+            'function' => [__CLASS__, 'generateImageLinkSmall'],
+            'default' => Meta::ELASTIC_TYPE_KEYWORD,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+            ],
+        ],
+        'in_stock' => [
+            'function' => [__CLASS__, 'getInStock'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+            'visible' => false,
+        ],
+        'is_virtual' => [
+            'function' => [__CLASS__, 'getIsVirtual'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+        ],
+        'link' => [
+            'function' => [__CLASS__, 'generateLinkRewrite'],
+            'default' => Meta::ELASTIC_TYPE_KEYWORD,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+            ],
+        ],
+        'id_tax_rules_group' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_INTEGER,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_INTEGER,
+            ],
+        ],
+        'manufacturer' => [
+            'function' => [__CLASS__, 'getManufacturerName'],
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'minimal_quantity' => [
+            'function' => [__CLASS__, 'getMinimalQuantity'],
+            'default' => Meta::ELASTIC_TYPE_INTEGER,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_INTEGER,
+            ],
+            'visible' => false,
+        ],
+        'new' => [
+            'function' => [__CLASS__, 'getNew'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+        ],
+        'price_tax_excl' => [
+            'function' => [__CLASS__, 'getPriceTaxExcl'],
+            'default' => Meta::ELASTIC_TYPE_FLOAT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_FLOAT,
+            ],
+        ],
+        'show_price' => [
+            'function' => [__CLASS__, 'getShowPrice'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+            'visible' => false,
+        ],
+        'supplier' => [
+            'function' => [__CLASS__, 'getSupplierName'],
+            'default' => Meta::ELASTIC_TYPE_TEXT,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_KEYWORD,
+                Meta::ELASTIC_TYPE_TEXT,
+            ],
+        ],
+        'on_sale' => [
+            'function' => [__CLASS__, 'getOnSale'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+        ],
+        'online_only' => [
+            'function' => [__CLASS__, 'getOnlineOnly'],
+            'default' => Meta::ELASTIC_TYPE_BOOLEAN,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_BOOLEAN,
+            ],
+        ],
+        'ordered_qty' => [
+            'function' => [__CLASS__, 'getOrderedQty'],
+            'default' => Meta::ELASTIC_TYPE_INTEGER,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_INTEGER,
+            ],
+        ],
+        'stock_qty' => [
+            'function' => [__CLASS__, 'getStockQty'],
+            'default' => Meta::ELASTIC_TYPE_INTEGER,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_INTEGER,
+            ],
+        ],
+        'weight' => [
+            'function' => null,
+            'default' => Meta::ELASTIC_TYPE_FLOAT,
+            'visible' => false,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_FLOAT,
+            ],
+        ],
+        'pageviews' => [
+            'function' => [__CLASS__, 'getPageViews'],
+            'default' => Meta::ELASTIC_TYPE_INTEGER,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_INTEGER,
+            ],
+        ],
+        'sales' => [
+            'function' => [__CLASS__, 'getSales'],
+            'default' => Meta::ELASTIC_TYPE_INTEGER,
+            'elastic_types' => [
+                Meta::ELASTIC_TYPE_INTEGER,
+            ],
+        ],
+    ];
+
+    /**
+     * This function automatically calls all the attribute function in this
+     * class and returns a "fetched" product with the defined attributes
+     *
+     * @param int $idProduct
+     * @param int $idLang
+     *
+     * @return stdClass
+     * @throws PrestaShopException
+     * @throws Adapter_Exception
+     * @throws SmartyException
+     */
+    public static function initProduct($idProduct, $idLang)
+    {
+        $elasticProduct = new stdClass();
+        $elasticProduct->id = (int)$idProduct;
+        $product = new Product($idProduct, true, $idLang);
+        if (!Validate::isLoadedObject($product)) {
+            return $elasticProduct;
+        }
+
+        $products = [$product];
+        static::addColorListHTML($products);
+        $idLangDefault = (int)Configuration::get('PS_LANG_DEFAULT');
+
+        $metas = [];
+        try {
+            foreach (Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS(
+                (new DbQuery())
+                    ->select('*')
+                    ->from(bqSQL(Meta::$definition['table']))
+            ) as $meta) {
+                $metas[$meta['alias']] = $meta;
+            }
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+        }
+
+        // Default properties
+        $propertyAliases = Elasticsearch::getAliases(array_keys(static::$attributes));
+        foreach (static::$attributes as $propName => $propItems) {
+            $propAlias = $propertyAliases[$propName];
+            if (!$metas[$propAlias]['enabled'] && !in_array($propName, [
+                    $propertyAliases['date_add'],
+                    $propertyAliases['date_upd'],
+                    $propertyAliases['price_tax_excl'],
+                    $propertyAliases['id_tax_rules_group'],
+                ])) {
+                continue;
+            }
+
+            if ($propItems['function'] != null && method_exists($propItems['function'][0], $propItems['function'][1])) {
+                $elasticProduct->{$propAlias} = call_user_func($propItems['function'], $product, $idLang);
+
+                continue;
+            }
+            if (!$propName) {
+                continue;
+            }
+
+            if (isset(Product::$definition[$propName]['lang']) == true) {
+                $elasticProduct->{$propAlias} = $product->{$propName}[$idLang];
+            } else {
+                $elasticProduct->{$propAlias} = $product->{$propName};
+            }
+
+            if ($propItems['default'] == Meta::ELASTIC_TYPE_BOOLEAN) {
+                $val = $elasticProduct->{$propAlias};
+                $elasticProduct->{$propAlias} = (bool)$val ? 'true' : 'false';
+            }
+        }
+
+        // Features
+        try {
+            foreach ($product->getFrontFeatures($idLang) as $feature) {
+                $name = Tools::link_rewrite($feature['name']);
+                if (!$name) {
+                    continue;
+                }
+
+                if ($idLang === $idLangDefault) {
+                    $featureCode = $name;
+                } else {
+                    $frontFeature = array_filter(Product::getFrontFeaturesStatic($idLangDefault, $product->id), function ($item) use ($feature) {
+                        return $item['id_feature'] == $feature['id_feature'];
+                    });
+                    $featureCode = Tools::link_rewrite(current($frontFeature)['name']);
+                }
+                $featureAlias = Elasticsearch::getAlias($featureCode, 'feature');
+                if (!$metas[$featureAlias]['enabled']) {
+                    continue;
+                }
+
+                $propItems = $feature['value'];
+
+                if (strpos($propItems, ', ') !== false) $propItems = explode(', ', $propItems);
+
+                $elasticProduct->{$featureAlias} = $propItems;
+            }
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+        }
+
+        // Attribute groups
+        try {
+            $attributeGroups = $product->getAttributesGroups($idLang);
+
+            // optimization for default language
+            $groupNames = [];
+            if ($idLang === $idLangDefault)  {
+                foreach ($attributeGroups as $attribute) {
+                    $groupNames[$attribute['id_attribute_group']] = Tools::link_rewrite($attribute['group_name']);
+                }
+                $attributeAliases = Elasticsearch::getAliases($groupNames, 'attribute');
+            } else {
+                $attributeAliases = [];
+            }
+
+            foreach ($attributeGroups as $attribute) {
+                $attributeName = $attribute['attribute_name'];
+                if ($idLang === $idLangDefault) {
+                    $attributeCode = $groupNames[$attribute['id_attribute_group']];
+                } else {
+                    $attributeGroup = new AttributeGroup($attribute['id_attribute_group'], $idLangDefault);
+                    $attributeCode = Tools::link_rewrite($attributeGroup->name);
+                }
+                $attributeAlias = isset($attributeAliases[$attributeCode])
+                    ? $attributeAliases[$attributeCode]
+                    : Elasticsearch::getAlias($attributeCode, 'attribute');
+
+                if (!$metas[$attributeAlias]['enabled']) {
+                    continue;
+                }
+
+                if (!isset($elasticProduct->{$attributeAlias}) || !is_array($elasticProduct->{$attributeAlias})) {
+                    $elasticProduct->{$attributeAlias} = [];
+                }
+
+                if (!in_array($attributeName, $elasticProduct->{$attributeAlias})) {
+                    $elasticProduct->{$attributeAlias}[] = $attributeName;
+                }
+
+                if ($attribute['is_color_group']) {
+                    // Add a special property for the color group
+                    // We assume [ yes, we are assuming something, I know :) ] that the color names and color codes
+                    // will eventually be in the same order, so that's how you can match them later
+                    if (!isset($elasticProduct->{"{$attributeAlias}_color_code"}) || !is_array($elasticProduct->{"{$attributeAlias}_color_code"})) {
+                        $elasticProduct->{"{$attributeAlias}_color_code"} = [];
+                        $elasticProduct->{"{$attributeAlias}_color_id_attribute"} = [];
+                    }
+
+                    if (!in_array($attribute['attribute_color'], $elasticProduct->{"{$attributeAlias}_color_code"})) {
+                        $elasticProduct->{"{$attributeAlias}_color_code"}[] = $attribute['attribute_color'];
+                        $elasticProduct->{"{$attributeAlias}_color_id_attribute"}[] = $attribute['id_attribute'];
+                    }
+                }
+            }
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+        }
+
+        // Filter metas
+        foreach ($metas as $code => $meta) {
+            if (!$meta['enabled'] && isset(static::$attributes[$code]['visible']) && static::$attributes[$code]['visible']) {
+                unset($elasticProduct->{$meta['alias']});
+            }
+        }
+
+        return $elasticProduct;
+    }
+
+    /**
+     * Collect the amount of page views for a product
+     *
+     * @param Product $product
+     *
+     * @return false|null|string
+     */
+    public static function getPageViews($product)
+    {
+        try {
+            return Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue(
+                (new DbQuery())
+                    ->select('IFNULL(SUM(pv.`counter`), 0)')
+                    ->from('page', 'pa')
+                    ->leftJoin('page_viewed', 'pv', 'pa.`id_page` = pv.`id_page`')
+                    ->where('pa.`id_object` = ' . (int)$product->id)
+                    ->where('pa.`id_page_type` = ' . (int)Page::getPageTypeByName('product'))
+            );
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return 0;
+        }
+
+    }
+
+    /**
+     * Get amount of sales for this product
+     *
+     * @param Product $product
+     *
+     * @return int
+     */
+    public static function getSales($product)
+    {
+        try {
+            $sales = ProductSale::getNbrSales($product->id);
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return 0;
+        }
+
+        return $sales > 0 ? $sales : 0;
+    }
+
+    /**
+     * Get category path
+     *
+     * @param int $idCategory
+     * @param int $idLang
+     *
+     * @return string
+     */
+    public static function getCategoryPath($idCategory, $idLang)
+    {
+        try {
+            $interval = Category::getInterval($idCategory);
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            $interval = false;
+        }
+
+        if ($interval) {
+            try {
+                $categories = Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS(
+                    (new DbQuery())
+                        ->select('c.*, cl.*')
+                        ->from('category', 'c')
+                        ->leftJoin('category_lang', 'cl', 'c.`id_category` = cl.`id_category`')
+                        ->join(Shop::addSqlRestrictionOnLang('cl'))
+                        ->join(Shop::addSqlAssociation('category', 'c'))
+                        ->where('c.`nleft` <= ' . (int)$interval['nleft'])
+                        ->where('c.`nright` >= ' . (int)$interval['nright'])
+                        ->where('cl.`id_lang` = ' . (int)$idLang)
+                        ->where('c.`active` = 1')
+                        ->where('c.`id_category` NOT IN (' . implode(',', array_map('intval', static::getCategoriesToAvoid())) . ')')
+                        ->orderBy('c.`level_depth` ASC')
+                );
+
+                return implode(static::CATEGORY_DELIMITER, array_column((array)$categories, 'name'));
+            } catch (PrestaShopException $e) {
+                Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+            }
+
+        }
+
+        return '';
+    }
+
+    /**
+     * Get stock quantity
+     *
+     * @param Product $product
+     * @return int
+     */
+    protected static function getStockQty($product)
+    {
+        try {
+            return Product::getQuantity($product->id);
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return 0;
+        }
+    }
+
+    /**
+     * Get the ordered quantity
+     *
+     * @param Product $product
+     *
+     * @return int
+     */
+    protected static function getOrderedQty($product)
+    {
+        if (!$product instanceof Product) {
+            return 0;
+        }
+
+        try {
+            return (int)Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue(
+                (new DbQuery())
+                    ->select('SUM(`product_quantity`) AS `total`')
+                    ->from('order_detail')
+                    ->where('`product_id` = ' . (int)$product->id)
+            );
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return 0;
+        }
+    }
+
+    /**
+     * Get price tax excl for all customer groups (pre-calc group discounts)
+     *
+     * @param Product $product
+     *
+     * @return array
+     *
+     * @todo: optimize `getGroups` query and include default Customer IDs for higher performance
+     */
+    protected static function getPriceTaxExcl($product)
+    {
+        // Simulate customer group prices via Customers in those groups
+        // Base price (0) is grabbed directly from the database
+        // Visitor group (1) is used as the default group for tax excl. prices
+        try {
+            $prices = [
+                'group_0' => (float)static::getProductBasePrice($product->id),
+                'group_1' => (float)Product::getPriceStatic($product->id, false, null, _TB_PRICE_DATABASE_PRECISION_),
+            ];
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return [];
+        }
+        try {
+            foreach (Group::getGroups(Context::getContext()->language->id) as $group) {
+                if ((int)$group['id_group'] === 1) {
+                    continue;
+                }
+                // Get a default customer in this group, if not available, skip. You will have to reindex this product
+                // once you add a customer to this (new) group
+                $idCustomer = Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue(
+                    (new DbQuery())
+                        ->select('c.`id_customer`')
+                        ->from(bqSQL(Customer::$definition['table']), 'c')
+                        ->innerJoin('customer_group', 'cg', 'cg.`id_customer` = c.`id_customer`')
+                        ->where('cg.`id_group` = ' . (int)$group['id_group'])
+                );
+                if (!$idCustomer) {
+                    $prices["group_{$group['id_group']}"] = $prices['group_0'];
+
+                    continue;
+                }
+                $prices["group_{$group['id_group']}"] = (float)Product::getPriceStatic(
+                    $product->id,
+                    false,
+                    null,
+                    _TB_PRICE_DATABASE_PRECISION_,
+                    null,
+                    false,
+                    true,
+                    1,
+                    false,
+                    $idCustomer
+                );
+            }
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return [];
+        }
+
+        return $prices;
+    }
+
+    /**
+     * Generate large image link
+     *
+     * @param Product $product
+     * @param int $idLang
+     *
+     * @return string
+     * @throws PrestaShopException
+     */
+    protected static function generateImageLinkLarge($product, $idLang)
+    {
+        return static::resolveImage($product, $idLang, 'large');
+    }
+
+    /**
+     * Generate small image link
+     *
+     * @param Product $product
+     * @param int $idLang
+     *
+     * @return string
+     * @throws PrestaShopException
+     */
+    protected static function generateImageLinkSmall($product, $idLang)
+    {
+        return static::resolveImage($product, $idLang, 'small');
+    }
+
+    /**
+     * Returns product image
+     *
+     * @param Product $product
+     * @param int $idLang
+     * @param string $type
+     * @return string
+     * @throws PrestaShopException
+     */
+    protected static function resolveImage($product, $idLang, $type)
+    {
+        $link = new Link();
+        try {
+            $cover = Image::getCover($product->id);
+            if (is_array($cover) && isset($cover['id_image']) && $cover['id_image']) {
+                return $link->getImageLink(
+                    $product->link_rewrite[$idLang],
+                    $cover['id_image'],
+                    ImageType::getFormatedName($type)
+                );
+            }
+        } catch (Exception $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+        }
+        return '';
+    }
+
+    /**
+     * Generate url slug
+     *
+     * @param Product $product
+     * @param int $idLang
+     *
+     * @return string
+     * @throws PrestaShopException
+     */
+    protected static function generateLinkRewrite($product, $idLang)
+    {
+        return Context::getContext()->link->getProductLink(
+            $product->id,
+            null,
+            null,
+            null,
+            $idLang,
+            Context::getContext()->shop->id,
+            0,
+            true
+        );
+    }
+
+    /**
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getAllowOosp($product)
+    {
+        try {
+            return (bool)Product::isAvailableWhenOutOfStock($product->out_of_stock);
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return false;
+        }
+    }
+
+    /**
+     * Get category name
+     *
+     * @param $product
+     * @param $idLang
+     * @return string
+     * @throws PrestaShopException
+     */
+    protected static function getCategoryName($product, $idLang)
+    {
+        $category = new Category($product->id_category_default, $idLang);
+
+        return $category->name;
+    }
+
+    /**
+     * Get category names without path
+     *
+     * @param Product $product
+     * @param int $idLang
+     *
+     * @return array
+     * @throws PrestaShopException
+     * @throws PrestaShopDatabaseException
+     */
+    protected static function getCategoriesNamesWithoutPath($product, $idLang)
+    {
+        $categoriesNames = static::getCategoriesNames($product, $idLang);
+
+        $endCategories = [];
+        foreach ($categoriesNames as $fullCategory) {
+            $parts = explode(static::CATEGORY_DELIMITER, $fullCategory);
+            $cnt = count($parts);
+            if (count($parts) > 0) {
+                $category = $parts[$cnt - 1];
+                $endCategories[$category] = 1;
+            }
+        }
+        return array_keys($endCategories);
+    }
+
+    /**
+     * Get category names
+     *
+     * @param Product $product
+     * @param int $idLang
+     *
+     * @return array
+     * @throws PrestaShopException
+     * @throws PrestaShopDatabaseException
+     */
+    protected static function getCategoriesNames($product, $idLang)
+    {
+        if (!$idLang) {
+            $idLang = Context::getContext()->language->id;
+        }
+        $idLang = (int)$idLang;
+
+        // Cached category paths
+        if (!array_key_exists($idLang, static::$cachedCategoryPaths)) {
+            static::$cachedCategoryPaths[$idLang] = [];
+        }
+
+        $categoryPaths = [];
+        $intervals = array_filter(array_map(function ($idCategory) use (&$categoryPaths, $idLang) {
+            if (!empty(static::$cachedCategoryPaths[$idLang][(int)$idCategory])) {
+                $categoryPaths[] = static::$cachedCategoryPaths[$idLang][(int)$idCategory];
+                return null;
+            }
+
+            $interval = Category::getInterval((int)$idCategory);
+            $interval['id_category'] = (int)$idCategory;
+
+            return $interval;
+        }, $product->getCategories()));
+
+        foreach ($intervals as $interval) {
+            $sql = new DbQuery();
+            $sql->select('`name`');
+            $sql->from('category', 'c');
+            $sql->leftJoin('category_lang', 'cl', 'c.id_category = cl.id_category AND id_lang = ' . (int)$idLang . Shop::addSqlRestrictionOnLang('cl'));
+            $sql->where('c.`nleft` <= ' . (int)$interval['nleft']);
+            $sql->where('c.`nright` >= ' . (int)$interval['nright']);
+            $sql->where('c.`id_category` NOT IN (' . implode(',', array_map('intval', static::getCategoriesToAvoid())) . ')');
+            $sql->orderBy('c.`level_depth`');
+
+            $result = implode(static::CATEGORY_DELIMITER, array_column((array)Db::getInstance(_PS_USE_SQL_SLAVE_)->executeS($sql), 'name'));
+            static::$cachedCategoryPaths[$idLang][$interval['id_category']] = $result;
+            $categoryPaths[] = $result;
+        }
+
+        return array_values(array_filter($categoryPaths));
+    }
+
+    /**
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getCustomizationRequired($product)
+    {
+        return (bool)$product->customization_required;
+    }
+
+    /**
+     * Get manufacturer name
+     *
+     * @param Product $product
+     *
+     * @return string
+     */
+    protected static function getManufacturerName($product)
+    {
+        try {
+            return Manufacturer::getNameById((int)$product->id_manufacturer);
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return '';
+        }
+    }
+
+    /**
+     * Get minimal quantity to order
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getMinimalQuantity($product)
+    {
+        return (int)$product->minimal_quantity;
+    }
+
+    /**
+     * Get `show_price` flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getShowPrice($product)
+    {
+        return (bool)$product->show_price;
+    }
+
+    /**
+     * Get supplier name
+     *
+     * @param Product $product
+     *
+     * @return string
+     */
+    protected static function getSupplierName($product)
+    {
+        return (string)$product->supplier_name;
+    }
+
+    /**
+     * Get is_virtual flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getIsVirtual($product)
+    {
+        return (bool)$product->is_virtual;
+    }
+
+    /**
+     * Get on sale flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getOnSale($product)
+    {
+        return (bool)$product->on_sale;
+    }
+
+    /**
+     * Get online only flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getOnlineOnly($product)
+    {
+        return (bool)$product->online_only;
+    }
+
+    /**
+     * Get available_for_order flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getAvailableForOrder($product)
+    {
+        return (bool)$product->available_for_order;
+    }
+
+    /**
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getNew($product)
+    {
+        return (bool)$product->new;
+    }
+
+    /**
+     * Get `available_now` flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getAvailableNow($product)
+    {
+        return (bool)$product->available_now;
+    }
+
+    /**
+     * Get `available_later` flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getAvailableLater($product)
+    {
+        return (bool)$product->available_later;
+    }
+
+    /**
+     * Get in stock flag
+     *
+     * @param Product $product
+     *
+     * @return bool
+     */
+    protected static function getInStock($product)
+    {
+        try {
+            return (bool)Product::getQuantity($product->id) > 0;
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return false;
+        }
+    }
+
+    /**
+     * Get the base price of a product
+     *
+     * @param int $idProduct
+     *
+     * @return float
+     */
+    protected static function getProductBasePrice($idProduct)
+    {
+        try {
+            return (float)Db::getInstance(_PS_USE_SQL_SLAVE_)->getValue(
+                (new DbQuery())
+                    ->select('ps.`price`')
+                    ->from('product', 'p')
+                    ->innerJoin(
+                        'product_shop',
+                        'ps',
+                        'ps.`id_product` = p.`id_product` AND ps.`id_shop` = ' . (int)Context::getContext()->shop->id
+                    )
+                    ->where('p.`id_product` = ' . (int)$idProduct)
+            );
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return 0;
+        }
+    }
+
+    /**
+     * Renders and adds color list HTML for each product in a list.
+     *
+     * @param Product[] $products
+     *
+     * @since   1.0.0
+     *
+     * @version 1.0.0 Initial version
+     * @throws SmartyException
+     */
+    protected static function addColorListHTML(&$products)
+    {
+        if (!is_array($products) || !count($products) || !file_exists(_PS_THEME_DIR_ . 'product-list-colors.tpl')) {
+            return;
+        }
+
+        $productsNeedCache = [];
+        foreach ($products as &$product) {
+            $productsNeedCache[] = (int)$product->id;
+        }
+        unset($product);
+
+        try {
+            Tools::enableCache();
+        } catch (PrestaShopException $e) {
+        }
+        foreach ($products as &$product) {
+            $colors = false;
+            if (count($productsNeedCache)) {
+                $colors = static::getAttributesColorList($productsNeedCache, $product->elastic_id_lang);
+            }
+            $tpl = Context::getContext()->smarty->createTemplate(
+                Elasticsearch::tpl('front/product-list-colors.tpl'),
+                Product::getColorsListCacheId($product->id)
+            );
+            if (isset($colors[$product->id])) {
+                $tpl->assign(
+                    [
+                        'id_product' => $product->id,
+                        'id_lang' => $product->elastic_id_lang,
+                        'colors_list' => $colors[$product->id],
+                        'link' => Context::getContext()->link,
+                        'img_col_dir' => _THEME_COL_DIR_,
+                        'col_img_dir' => _PS_COL_IMG_DIR_,
+                    ]
+                );
+            }
+
+            if (!in_array($product->id, $productsNeedCache) || isset($colors[$product->id])) {
+                $product->color_list = $tpl->fetch(
+                    Elasticsearch::tpl('front/product-list-colors.tpl'),
+                    Product::getColorsListCacheId($product->id)
+                );
+            } else {
+                $product->color_list = '';
+            }
+        }
+        Tools::restoreCacheSettings();
+    }
+
+    /**
+     * @param array $products
+     * @param null $idLang
+     * @return array|bool
+     *
+     * @since   1.0.0
+     * @version 1.0.0 Initial version
+     */
+    protected static function getAttributesColorList(array $products, $idLang = null)
+    {
+        if (!count($products)) {
+            return [];
+        }
+
+        if (!$idLang) {
+            $idLang = Context::getContext()->language->id;
+        }
+
+        try {
+            $checkStock = !Configuration::get('PS_DISP_UNAVAILABLE_ATTR');
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return false;
+        }
+        try {
+            if (!$res = Db::getInstance()->executeS(
+                '
+                SELECT pa.`id_product`, a.`color`, pac.`id_product_attribute`, ' . ($checkStock ? 'SUM(IF(stock.`quantity` > 0, 1, 0))' : '0') . ' qty, a.`id_attribute`, al.`name`, IF(color = "", a.id_attribute, color) group_by
+                FROM `' . _DB_PREFIX_ . 'product_attribute` pa
+                ' . Shop::addSqlAssociation('product_attribute', 'pa') . ($checkStock ? Product::sqlStock('pa', 'pa') : '') . '
+                JOIN `' . _DB_PREFIX_ . 'product_attribute_combination` pac ON (pac.`id_product_attribute` = product_attribute_shop.`id_product_attribute`)
+                JOIN `' . _DB_PREFIX_ . 'attribute` a ON (a.`id_attribute` = pac.`id_attribute`)
+                JOIN `' . _DB_PREFIX_ . 'attribute_lang` al ON (a.`id_attribute` = al.`id_attribute` AND al.`id_lang` = ' . (int)$idLang . ')
+                JOIN `' . _DB_PREFIX_ . 'attribute_group` ag ON (a.id_attribute_group = ag.`id_attribute_group`)
+                WHERE pa.`id_product` IN (' . implode(',',  array_map('intval', $products)) . ') AND ag.`is_color_group` = 1
+                GROUP BY pa.`id_product`, a.`id_attribute`
+                ORDER BY al.`name` ASC;'
+            )
+            ) {
+                return false;
+            }
+        } catch (PrestaShopException $e) {
+            Logger::addLog("Elasticsearch module error: {$e->getMessage()}");
+
+            return false;
+        }
+
+        $colors = [];
+        foreach ($res as $row) {
+            if (Tools::isEmpty($row['color']) && !@filemtime(_PS_COL_IMG_DIR_ . $row['id_attribute'] . '.jpg')) {
+                continue;
+            }
+
+            $colors[(int)$row['id_product']][] = [
+                'id_product_attribute' => (int)$row['id_product_attribute'],
+                'color' => $row['color'],
+                'id_product' => $row['id_product'],
+                'name' => $row['name'],
+                'id_attribute' => $row['id_attribute']
+            ];
+        }
+
+        return $colors;
+    }
+
+    /**
+     * @return array
+     * @throws PrestaShopException
+     */
+    protected static function getCategoriesToAvoid()
+    {
+        if (is_null(static::$avoidCategories)) {
+            static::$avoidCategories = [
+                Configuration::get('PS_HOME_CATEGORY'),
+                Configuration::get('PS_ROOT_CATEGORY'),
+            ];
+        }
+        return static::$avoidCategories;
+    }
+}

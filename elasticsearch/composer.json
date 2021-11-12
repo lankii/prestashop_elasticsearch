@@ -1,0 +1,13 @@
+{
+    "name": "fireteam/elasticsearch",
+    "description": "Elasticsearch module for fire team platform",
+    "require": {
+        "elasticsearch/elasticsearch": "^7.0",
+        "ext-json": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "ElasticsearchModule\\": "classes/"
+        }
+    }
+}

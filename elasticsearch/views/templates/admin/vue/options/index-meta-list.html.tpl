@@ -1,0 +1,95 @@
+
+<div class="form-group">
+  <label class="control-label col-lg-3">
+    <span class="label-tooltip"
+          data-toggle="tooltip"
+          title=""
+          data-original-title="{l s='You can drag and drop filters to adjust positions' mod='elasticsearch'}"
+    >
+      {l s='Fields' mod='elasticsearch'}
+    </span>
+  </label>
+  <div class="col-lg-9">
+    <section class="filter_panel">
+      <header class="clearfix">
+        <span class="badge badge-info">{l s='Total fields:' mod='elasticsearch'} %% _.filter(metas, function (item) { return item.visible; }).length %%</span>
+      </header>
+      <section class="filter_list">
+        <ul class="list-unstyled sortable">
+          <li v-for="(meta, index) in metas"
+              v-if="meta.visible"
+              :key="meta.code"
+              class="filter_list_item"
+              draggable="true"
+              style="display: table;"
+          >
+            <span class="col-lg-2">
+              <meta-badge :meta="meta" id-lang="idLang" :config-key="configKey"></meta-badge>
+            </span>
+
+            <span class="switch prestashop-switch col-lg-2 col-md-3 col-sm-4 col-xs-4"
+                  @click="toggleMetaEnabled(meta, $event)"
+                  style="margin: 0 5px; pointer-events: all"
+            >
+              <input type="radio"
+                     :id="'meta_enabled_' + meta.code + '_on'"
+                     :name="'meta_enabled_' + meta.code"
+                     :value="1"
+                     :checked="meta.enabled"
+              />
+              <label :for="'meta_enabled_' + meta.code + '_on'">
+                <p>{l s='On' mod='elasticsearch'}</p>
+              </label>
+              <input
+                      type="radio"
+                      :id="'meta_enabled_' + meta.code + '_off'"
+                      :name="'meta_enabled_' + meta.code"
+                      :value="0"
+                      :checked="!meta.enabled"
+              />
+              <label :for="'meta_enabled_' + meta.code + '_off'">
+                <p>{l s='Off' mod='elasticsearch'}</p>
+              </label>
+                <a class="slide-button btn"></a>
+            </span>
+
+            <div class="translatable-field col-lg-4">
+              <div :class="languages.length > 1 ? 'col-lg-9' : 'col-lg-12'">
+                <input type="text"
+                       :id="'name_' + idLang"
+                       :name="'name' + idLang"
+                       class=""
+                       :value="meta.name[idLang]"
+                       required="required"
+                       @keyup="updateMetaName(meta.code, idLang, $event)">
+              </div>
+              <div v-if="languages.length > 1" class="col-lg-2">
+                <button type="button" class="btn btn-default dropdown-toggle" data-toggle="dropdown">
+                  <span>%% _.find(languages, {ldelim}id_lang: idLang.toString(){rdelim}).iso_code %%</span>
+                  <i class="icon-caret-down"></i>
+                </button>
+                <ul class="dropdown-menu">
+                  <li v-for="language in languages">
+                    <a @click="updateLanguage(language.id_lang, $event)" class="pointer">%% language.name %%</a>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="pull-right">
+            <span>{l s='Field type:' mod='elasticsearch'} </span>
+            <select @change="updateElasticType(meta.code, $event)" class="selectpicker col-lg-2" :disabled="meta.elastic_types ? meta.elastic_types.length <= 1 : true">
+              <option v-for="elasticType in (meta.elastic_types ? _.sortBy(meta.elastic_types) : _.sortBy(elasticTypes))"
+                      :value="elasticType"
+                      :selected="meta.elastic_type === elasticType ? 'selected' : null"
+                      :data-content.once="'<kbd>' + elasticType + '</kbd>'"
+              >%% elasticType %%
+              </option>
+            </select>
+            </div>
+          </li>
+        </ul>
+      </section>
+    </section>
+  </div>
+</div>
